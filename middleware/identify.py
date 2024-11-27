@@ -228,6 +228,8 @@ class SessionCookieValidator(IdentityValidator):
                 log.error(
                     f"HTTP error during GCP IAP session validation: {e.response.text}"
                 )
+            except Exception as e:
+                log.error(f"Error during GCP IAP session validation {str(e)}")
         return False
 
 class IdentifyMiddleware(BaseHTTPMiddleware):
