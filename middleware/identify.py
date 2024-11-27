@@ -185,6 +185,7 @@ class SessionCookieValidator(IdentityValidator):
             bool: True if session validation succeeds, False otherwise.
         """
         headers = {"X-Requested-With": "XMLHttpRequest", **request.headers}
+        log.info(f"HEADERS: {headers}")
         if await self._attempt_session_validation(request, headers):
             return True
         log.info("Retrying session validation with DO_SESSION_REFRESH flag.")
