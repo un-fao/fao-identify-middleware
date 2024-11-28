@@ -220,23 +220,26 @@ class SessionCookieValidator(IdentityValidator):
             cookies.set(key, value)
 
         async with httpx.AsyncClient(cookies=cookies, timeout=5) as client:
-            try:
-                response = await client.get(url, headers=headers)
-                response.raise_for_status()
-                identity = response.json()
-                if "email" in identity:
-                    request.session["user"] = identity
-                    log.info(f"Validated session for email: {identity['email']}.")
-                    return True
-                log.warning("Missing email in identity response.")
-            except httpx.RequestError as e:
-                log.error(f"Error during GCP IAP session validation: {e}")
-            except httpx.HTTPStatusError as e:
-                log.error(
-                    f"HTTP status error during validation: {e.response.status_code} - {e.response.text}")
-            except Exception as e:
-                log.error(f"Unexpected error during session validation {str(e)}")
+                try:
+                    response = await client.get(url, headers=headers)
+                    log.info(f"Response status: {response.status_code}")
+                    log.info(f"Response body: {response.text}")
+                    response.raise_for_status()
+                    identity = response.json()
+                    log.info(f"Identity: {identity}")
+                    if "email" in identity:
+                        request.session["user"] = identity
+                        return True
+                except httpx.RequestError as e:
+                    log.error(f"Request error during validation: {e}")
+                except httpx.HTTPStatusError as e:
+                    log.error(f"HTTP status error: {e.response.status_code} - {e.response.text}")
+                except ValueError as e:
+                    log.error(f"JSON decoding error: {e}")
+                except Exception as e:
+                    log.error(f"Unexpected error: {e}")
         return False
+
 
 class IdentifyMiddleware(BaseHTTPMiddleware):
     """
