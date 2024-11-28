@@ -184,13 +184,18 @@ class SessionCookieValidator(IdentityValidator):
         Returns:
             bool: True if session validation succeeds, False otherwise.
         """
-        headers = {"X-Requested-With": "XMLHttpRequest", **request.headers}
-        headers = {"authorization": headers.get("authorization"), "X-Requested-With": "XMLHttpRequest"}
+        # headers = {"X-Requested-With": "XMLHttpRequest", **request.headers}
+        # headers = {"authorization": headers.get("authorization"), "X-Requested-With": "XMLHttpRequest"}
+        # log.info(f"HEADERS: {headers}")
+        headers = {key: value for key, value in request.headers.items()}
+        headers["X-Requested-With"] = "XMLHttpRequest"
         log.info(f"HEADERS: {headers}")
         if await self._attempt_session_validation(request, headers):
             return True
-        log.info("Retrying session validation with DO_SESSION_REFRESH flag.")
-        return await self._attempt_session_validation(request, headers, refresh=True)
+
+        refresh=True
+        log.info(f"Retrying session validation with DO_SESSION_REFRESH={refresh}")
+        return await self._attempt_session_validation(request, headers, refresh)
 
     async def _attempt_session_validation(
         self, request: Request, headers: dict, refresh: bool = False
@@ -228,10 +233,9 @@ class SessionCookieValidator(IdentityValidator):
                 log.error(f"Error during GCP IAP session validation: {e}")
             except httpx.HTTPStatusError as e:
                 log.error(
-                    f"HTTP error during GCP IAP session validation: {e.response.text}"
-                )
+                    f"HTTP status error during validation: {e.response.status_code} - {e.response.text}")
             except Exception as e:
-                log.error(f"Error during GCP IAP session validation {str(e)}")
+                log.error(f"Unexpected error during session validation {str(e)}")
         return False
 
 class IdentifyMiddleware(BaseHTTPMiddleware):
@@ -266,13 +270,15 @@ class IdentifyMiddleware(BaseHTTPMiddleware):
         for validator in self.validators:
             validator_name = validator.__class__.__name__
             try:
-                if await validator.validate(request):
+                result = await validator.validate(request)
+                if result:
                     log.info(f"Validation succeeded with {validator_name}.")
-                    return await call_next(request)
-                log.debug(f"Validation failed for {validator_name}.")
+                    break  # Exit loop on first success
+                log.info(f"Validation failed for {validator_name}.")
             except Exception as e:
                 log.error(f"Error during validation with {validator_name}: {e}")
+        else:
+            log.info("Unauthenticated request. Treating as public access.")
+            request.session.pop("user", None)
+            return await call_next(request)
 
-        log.info("Unauthenticated request. Treating as public access.")
-        request.session.pop("user", None)
-        return await call_next(request)
