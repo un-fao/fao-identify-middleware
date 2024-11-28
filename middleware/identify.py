@@ -45,11 +45,39 @@ from abc import ABC, abstractmethod
 import httpx
 from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
+from google.auth.transport import requests
+from google.oauth2 import id_token
+
 from utils.jwt_utils import check_token_expiration, verify_iap_jwt
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 log = logging.getLogger(__name__)
+
+
+
+
+def receive_authorized_get_request(request):
+    """Parse the authorization header and decode the information
+    being sent by the Bearer token.
+
+    Args:
+        request: Flask request object
+
+    Returns:
+        The email from the request's Authorization header.
+    """
+    auth_header = request.headers.get("Authorization")
+    if auth_header:
+        # split the auth type and value from the header.
+        auth_type, creds = auth_header.split(" ", 1)
+
+        if auth_type.lower() == "bearer":
+            claims = id_token.verify_token(creds, requests.Request())
+            log.info(f"claims: {claims}")
+            return claims['email']
+    return None
+
 
 
 class IdentityValidator(ABC):
@@ -190,6 +218,10 @@ class SessionCookieValidator(IdentityValidator):
         # headers = {key: value for key, value in request.headers.items()}
         # headers["X-Requested-With"] = "XMLHttpRequest"
         log.info(f"HEADERS: {headers}")
+
+        identity_email = receive_authorized_get_request(request)
+        if identity_email:
+            return True
         if await self._attempt_session_validation(request, headers):
             return True
 
