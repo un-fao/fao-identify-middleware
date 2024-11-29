@@ -3,6 +3,8 @@ import logging
 from fastapi import HTTPException
 from google.oauth2.id_token import verify_oauth2_token
 from google.auth.transport.requests import Request as GoogleAuthRequest
+from google.auth.transport import requests
+from google.oauth2 import id_token
 
 # Configure logging
 log = logging.getLogger(__name__)
@@ -65,3 +67,26 @@ def verify_iap_jwt(iap_jwt: str, audience: str) -> dict:
         raise HTTPException(
             status_code=403, detail=f"Unauthorized: Invalid token ({str(e)})"
         ) from e
+
+
+
+def receive_authorized_get_request(request):
+    """Parse the authorization header and decode the information
+    being sent by the Bearer token.
+
+    Args:
+        request: Flask request object
+
+    Returns:
+        The email from the request's Authorization header.
+    """
+    auth_header = request.headers.get("Authorization")
+    if auth_header:
+        # split the auth type and value from the header.
+        auth_type, creds = auth_header.split(" ", 1)
+
+        if auth_type.lower() == "bearer":
+            claims = id_token.verify_token(creds, requests.Request())
+            log.info(f"claims: {claims}")
+            return claims['email']
+    return None

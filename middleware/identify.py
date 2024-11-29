@@ -1,38 +1,53 @@
 """
-Identify Middleware for FAO FastAPI Applications.
+Identify Middleware for FAO FastAPI Applications
 
-This module provides the `IdentifyMiddleware` class to manage user authentication in a FastAPI app.
-It supports multiple validation methods, including API key validation, session-based validation, 
-and cookie-based session validation. The module ensures extensibility using a base `IdentityValidator`.
+This module provides the `IdentifyMiddleware` class, which is used to manage user 
+authentication in a FastAPI application. It supports a range of validation methods, 
+including API key validation, OAuth2 Bearer token validation, session-based validation, 
+and session cookie-based validation. This ensures flexibility in handling different 
+authentication mechanisms. The module is designed to be extensible using a base 
+`IdentityValidator` class, which enables the seamless addition of custom validators.
 
 Dependencies:
-    - `verify_iap_jwt`: Utility in `utils.jwt_utils` to decode and validate IAP JWT tokens.
-    - `check_token_expiration`: Utility in `utils.jwt_utils` to verify token expiration timestamps.
-    - `requests`: Library used for HTTP calls to external identity services.
+    - `verify_iap_jwt`: A utility in `utils.jwt_utils` for decoding and validating IAP JWT tokens.
+    - `check_token_expiration`: A utility in `utils.jwt_utils` for verifying token expiration timestamps.
+    - `receive_authorized_get_request`: A utility in `utils.jwt_utils` for decoding OAuth2 Bearer tokens.
+    - `httpx`: A library used for HTTP calls to external identity services.
 
 Constants:
-    - `KEY_AUTHORIZATION_HEADER`: Default header key to locate the API key.
-    - `GCP_IAP_URL`: URL for GCP IAP identity verification.
+    - `KEY_AUTHORIZATION_HEADER`: Defines the default header key for locating the API key.
+    - `GCP_IAP_URL`: Specifies the URL for GCP IAP identity verification services.
+
+Features:
+    - **Extensibility**: Custom validators can be implemented by extending the `IdentityValidator` class.
+    - **Composability**: Multiple validators can be composed and applied sequentially.
+    - **Flexibility**: Supports multiple authentication mechanisms, such as API keys, session cookies,
+      and OAuth2 tokens.
+    - **Logging**: Provides detailed logs for validation success, failure, and errors.
 
 Usage:
-    Add `IdentifyMiddleware` to a FastAPI app with the desired validators. Each validator implements
-    a specific authentication method and is applied sequentially during request handling.
+    Add `IdentifyMiddleware` to a FastAPI application along with the desired validators.
+    Each validator applies a specific authentication mechanism and processes incoming
+    requests sequentially. Once a validator succeeds, no further validation is performed.
 
 Example:
     from fastapi import FastAPI
     from your_project.middleware.identify import (
         IdentifyMiddleware,
-        APIKeyValidator,
+        IAPSessionValidator,
+        Oauth2Validator,
         SessionIdentityValidator,
-        SessionCookieValidator,
     )
 
     GCP_IAP_URL = "https://data.dev.fao.org/private"
 
     validators = [
-        SessionIdentityValidator(expiration_threshold=300),  # Check session identity
-        SessionCookieValidator(gcp_iap_url=GCP_IAP_URL),     # Validate cookies
-        APIKeyValidator(audience=f"/projects/{PROJECT_NUMBER}/apps/{PROJECT_ID}"),  # Validate API keys
+        Oauth2Validator(),                                   # Validate OAuth2 Bearer tokens
+        IAPSessionValidator(                                 # Validate API keys and session cookies
+            audience=f"/projects/{PROJECT_NUMBER}/apps/{PROJECT_ID}",
+            gcp_iap_url=GCP_IAP_URL
+        ),
+        SessionIdentityValidator(expiration_threshold=300),  # Validate in-memory session identity
     ]
 
     app = FastAPI()
@@ -40,44 +55,23 @@ Example:
     app.add_middleware(IdentifyMiddleware, validators=validators)
 """
 
+
 import logging
 from abc import ABC, abstractmethod
 import httpx
 from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
-from google.auth.transport import requests
-from google.oauth2 import id_token
 
-from utils.jwt_utils import check_token_expiration, verify_iap_jwt
+
+from utils.jwt_utils import (
+    check_token_expiration,
+    verify_iap_jwt,
+    receive_authorized_get_request
+)
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 log = logging.getLogger(__name__)
-
-
-
-
-def receive_authorized_get_request(request):
-    """Parse the authorization header and decode the information
-    being sent by the Bearer token.
-
-    Args:
-        request: Flask request object
-
-    Returns:
-        The email from the request's Authorization header.
-    """
-    auth_header = request.headers.get("Authorization")
-    if auth_header:
-        # split the auth type and value from the header.
-        auth_type, creds = auth_header.split(" ", 1)
-
-        if auth_type.lower() == "bearer":
-            claims = id_token.verify_token(creds, requests.Request())
-            log.info(f"claims: {claims}")
-            return claims['email']
-    return None
-
 
 
 class IdentityValidator(ABC):
@@ -139,31 +133,82 @@ class SessionIdentityValidator(IdentityValidator):
         return False
 
 
-class APIKeyValidator(IdentityValidator):
+class Oauth2Validator(IdentityValidator):
     """
-    Validator for API key-based authentication.
+    Validator for OAuth2 Bearer token-based authentication.
 
-    Validates the API key by verifying and decoding it using the `verify_iap_jwt` utility and ensures
-    its validity through token expiration.
+    Validates the Bearer token in the `Authorization` header and extracts the user's email from it.
+    """
+
+    async def validate(self, request: Request) -> bool:
+        """
+        Validate the OAuth2 Bearer token in the request.
+
+        Args:
+            request (Request): The incoming FastAPI request object.
+
+        Returns:
+            bool: True if the Bearer token is valid and the email is retrieved, False otherwise.
+        """
+        try:
+            email = receive_authorized_get_request(request)
+            if email:
+                request.session["user"] = {"email": email}
+                log.info(f"OAuth2 token validation succeeded for email: {email}")
+                return True
+            log.info("OAuth2 token validation failed: No email retrieved.")
+        except Exception as e:
+            log.error(f"OAuth2 token validation failed: {e}")
+        return False
+
+
+class IAPSessionValidator(IdentityValidator):
+    """
+    Validator for API key-based authentication and session-based authentication using GCP IAP.
+
+    Combines:
+    - Session cookie validation by making HTTP requests to the GCP IAP identity service.
+    - API key validation by verifying and decoding it using the `verify_iap_jwt` utility.
     """
 
     def __init__(
         self,
         audience: str,
+        gcp_iap_url: str,
         authorization_header_key: str = "X-Goog-Iap-Jwt-Assertion",
     ):
         """
-        Initialize the APIKeyValidator.
+        Initialize the IAPSessionValidator.
 
         Args:
             audience (str): The expected audience for the JWT token.
+            gcp_iap_url (str): URL for the GCP IAP identity verification endpoint.
             authorization_header_key (str, optional): The header key used to retrieve the API key from
                 the request. Defaults to "X-Goog-Iap-Jwt-Assertion".
         """
         self.audience = audience
+        self.gcp_iap_url = gcp_iap_url
         self.authorization_header_key = authorization_header_key
 
     async def validate(self, request: Request) -> bool:
+        """
+        Validate the request for both API key-based and session-based authentication.
+
+        Args:
+            request (Request): The incoming FastAPI request object.
+
+        Returns:
+            bool: True if any validation succeeds, False otherwise.
+        """
+        if await self._validate_session_cookies(request):
+            return True
+
+        if await self._validate_api_key(request):
+            return True
+
+        return False
+
+    async def _validate_api_key(self, request: Request) -> bool:
         """
         Validate the API key in the request headers.
 
@@ -180,29 +225,13 @@ class APIKeyValidator(IdentityValidator):
                 decoded_jwt = verify_iap_jwt(apikey, self.audience)
                 check_token_expiration(decoded_jwt)
                 request.session["user"] = decoded_jwt
+                log.info("API key validation succeeded.")
                 return True
             except Exception as e:
                 log.error(f"API key validation failed: {e}")
         return False
 
-
-class SessionCookieValidator(IdentityValidator):
-    """
-    Validator for session-based authentication using GCP IAP.
-
-    Makes HTTP requests to the GCP IAP identity service to validate session cookies.
-    """
-
-    def __init__(self, gcp_iap_url: str):
-        """
-        Initialize the SessionCookieValidator.
-
-        Args:
-            gcp_iap_url (str): URL for the GCP IAP identity verification endpoint.
-        """
-        self.gcp_iap_url = gcp_iap_url
-
-    async def validate(self, request: Request) -> bool:
+    async def _validate_session_cookies(self, request: Request) -> bool:
         """
         Validate session cookies via GCP IAP identity service.
 
@@ -214,14 +243,8 @@ class SessionCookieValidator(IdentityValidator):
         """
         headers = {"X-Requested-With": "XMLHttpRequest", **request.headers}
         headers = {"authorization": headers.get("authorization"), "X-Requested-With": "XMLHttpRequest"}
-        # log.info(f"HEADERS: {headers}")
-        # headers = {key: value for key, value in request.headers.items()}
-        # headers["X-Requested-With"] = "XMLHttpRequest"
-        log.info(f"HEADERS: {headers}")
+        log.info(f"Session validation headers: {headers}")
 
-        identity_email = receive_authorized_get_request(request)
-        if identity_email:
-            return True
         if await self._attempt_session_validation(request, headers):
             return True
 
@@ -252,24 +275,25 @@ class SessionCookieValidator(IdentityValidator):
             cookies.set(key, value)
 
         async with httpx.AsyncClient(cookies=cookies, timeout=5) as client:
-                try:
-                    response = await client.get(url, headers=headers)
-                    log.info(f"Response status: {response.status_code}")
-                    log.info(f"Response body: {response.text}")
-                    response.raise_for_status()
-                    identity = response.json()
-                    log.info(f"Identity: {identity}")
-                    if "email" in identity:
-                        request.session["user"] = identity
-                        return True
-                except httpx.RequestError as e:
-                    log.error(f"Request error during validation: {e}")
-                except httpx.HTTPStatusError as e:
-                    log.error(f"HTTP status error: {e.response.status_code} - {e.response.text}")
-                except ValueError as e:
-                    log.error(f"JSON decoding error: {e}")
-                except Exception as e:
-                    log.error(f"Unexpected error: {e}")
+            try:
+                response = await client.get(url, headers=headers)
+                log.info(f"Response status: {response.status_code}")
+                log.info(f"Response body: {response.text}")
+                response.raise_for_status()
+                identity = response.json()
+                log.info(f"Identity: {identity}")
+                if "email" in identity:
+                    request.session["user"] = identity
+                    log.info("Session cookie validation succeeded.")
+                    return True
+            except httpx.RequestError as e:
+                log.error(f"Request error during session validation: {e}")
+            except httpx.HTTPStatusError as e:
+                log.error(f"HTTP status error: {e.response.status_code} - {e.response.text}")
+            except ValueError as e:
+                log.error(f"JSON decoding error: {e}")
+            except Exception as e:
+                log.error(f"Unexpected error during session validation: {e}")
         return False
 
 

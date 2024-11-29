@@ -2,13 +2,20 @@
 
 This repository provides a robust middleware solution for managing user authentication in FastAPI applications. The `IdentifyMiddleware` class allows flexible integration of multiple identity validation methods, ensuring security and extensibility for different use cases.
 
+---
+
 ## Features
+
 - **Pluggable Validators:**
   - API key-based authentication.
+  - OAuth2 Bearer token validation.
   - Session-based validation with expiration checks.
   - Cookie-based session validation using GCP IAP.
 - **Extensibility:** Built using a base `IdentityValidator` class to support custom validators.
 - **Utilities:** Includes utilities for JWT token decoding and expiration checks.
+- **Logging:** Provides detailed logs for validation success, failure, and errors.
+
+---
 
 ## Installation
 Clone the repository and install it using pip:
@@ -22,15 +29,14 @@ Here’s an example of integrating `IdentifyMiddleware` into your FastAPI applic
 
 ```python
 import secrets
-
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
 
 from middleware.identify import (
     IdentifyMiddleware,
-    APIKeyValidator,
+    IAPSessionValidator,
+    Oauth2Validator,
     SessionIdentityValidator,
-    SessionCookieValidator,
 )
 from utils.jwt_utils import verify_iap_jwt
 
@@ -40,9 +46,12 @@ PROJECT_ID = "your-project-id"
 GCP_IAP_URL = "https://example_iap.com/secure"
 
 validators = [
-    SessionIdentityValidator(expiration_threshold=300),  # Check session identity
-    SessionCookieValidator(gcp_iap_url=GCP_IAP_URL),     # Validate cookies
-    APIKeyValidator(audience=f"/projects/{PROJECT_NUMBER}/apps/{PROJECT_ID}"),  # Validate API keys
+    Oauth2Validator(),  # Validate OAuth2 Bearer tokens
+    IAPSessionValidator(  # Validate API keys and session cookies
+        audience=f"/projects/{PROJECT_NUMBER}/apps/{PROJECT_ID}",
+        gcp_iap_url=GCP_IAP_URL,
+    ),
+    SessionIdentityValidator(expiration_threshold=300),  # Validate in-memory session identity
 ]
 
 app = FastAPI()
