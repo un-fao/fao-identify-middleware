@@ -151,10 +151,10 @@ class Oauth2Validator(IdentityValidator):
             bool: True if the Bearer token is valid and the email is retrieved, False otherwise.
         """
         try:
-            email = receive_authorized_get_request(request)
-            if email:
-                request.session["user"] = {"email": email}
-                log.info(f"OAuth2 token validation succeeded for email: {email}")
+            sub = receive_authorized_get_request(request)
+            if sub:
+                request.session["user"] = {"email": sub}
+                log.info(f"OAuth2 token validation succeeded for OAuth 2 Client ID: {sub}")
                 return True
             log.info("OAuth2 token validation failed: No email retrieved.")
         except Exception as e:

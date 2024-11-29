@@ -88,5 +88,5 @@ def receive_authorized_get_request(request):
         if auth_type.lower() == "bearer":
             claims = id_token.verify_token(creds, requests.Request())
             log.info(f"claims: {claims}")
-            return claims['email']
+            return claims['sub']
     return None
