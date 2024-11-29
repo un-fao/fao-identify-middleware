@@ -329,15 +329,12 @@ class IdentifyMiddleware(BaseHTTPMiddleware):
         for validator in self.validators:
             validator_name = validator.__class__.__name__
             try:
-                result = await validator.validate(request)
-                if result:
+                if await validator.validate(request):
                     log.info(f"Validation succeeded with {validator_name}.")
-                    break  # Exit loop on first success
-                log.info(f"Validation failed for {validator_name}.")
+                    return await call_next(request)
+                log.debug(f"Validation failed for {validator_name}.")
             except Exception as e:
                 log.error(f"Error during validation with {validator_name}: {e}")
-        else:
-            log.info("Unauthenticated request. Treating as public access.")
-            request.session.pop("user", None)
-            return await call_next(request)
-
+        log.info("Unauthenticated request. Treating as public access.")
+        request.session.pop("user", None)
+        return await call_next(request)
