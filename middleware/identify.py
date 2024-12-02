@@ -200,15 +200,15 @@ class IAPSessionValidator(IdentityValidator):
         Returns:
             bool: True if any validation succeeds, False otherwise.
         """
-        if await self._validate_session_cookies(request):
+        if await self._validate_iap_session_cookies(request):
             return True
 
-        if await self._validate_api_key(request):
+        if await self._validate_iap_api_key(request):
             return True
 
         return False
 
-    async def _validate_api_key(self, request: Request) -> bool:
+    async def _validate_iap_api_key(self, request: Request) -> bool:
         """
         Validate the API key in the request headers.
 
@@ -220,18 +220,18 @@ class IAPSessionValidator(IdentityValidator):
         """
         apikey = request.headers.get(self.authorization_header_key)
         if apikey:
-            log.info("API key detected in request headers.")
+            log.info("IAP API key detected in request headers.")
             try:
                 decoded_jwt = verify_iap_jwt(apikey, self.audience)
                 check_token_expiration(decoded_jwt)
                 request.session["user"] = decoded_jwt
-                log.info("API key validation succeeded.")
+                log.info("IAP API key validation succeeded.")
                 return True
             except Exception as e:
-                log.error(f"API key validation failed: {e}")
+                log.error(f"IAP API key validation failed: {e}")
         return False
 
-    async def _validate_session_cookies(self, request: Request) -> bool:
+    async def _validate_iap_session_cookies(self, request: Request) -> bool:
         """
         Validate session cookies via GCP IAP identity service.
 
@@ -242,17 +242,17 @@ class IAPSessionValidator(IdentityValidator):
             bool: True if session validation succeeds, False otherwise.
         """
         headers = {"X-Requested-With": "XMLHttpRequest", **request.headers}
-        # headers = {"authorization": headers.get("authorization"), "X-Requested-With": "XMLHttpRequest"}
-        log.info(f"Session validation headers: {headers}")
+        headers = {"authorization": headers.get("authorization"), "X-Requested-With": "XMLHttpRequest"}
+        log.info(f"IAP Session validation headers: {headers}")
 
-        if await self._attempt_session_validation(request, headers):
+        if await self._attempt_iap_session_validation(request, headers):
             return True
 
         refresh=True
-        log.info(f"Retrying session validation with DO_SESSION_REFRESH={refresh}")
-        return await self._attempt_session_validation(request, headers, refresh)
+        log.info(f"Retrying IAP session validation with DO_SESSION_REFRESH={refresh}")
+        return await self._attempt_iap_session_validation(request, headers, refresh)
 
-    async def _attempt_session_validation(
+    async def _attempt_iap_session_validation(
         self, request: Request, headers: dict, refresh: bool = False
     ) -> bool:
         """
@@ -284,16 +284,16 @@ class IAPSessionValidator(IdentityValidator):
                 log.info(f"Identity: {identity}")
                 if "email" in identity:
                     request.session["user"] = identity
-                    log.info("Session cookie validation succeeded.")
+                    log.info("IAP Session cookie validation succeeded.")
                     return True
             except httpx.RequestError as e:
-                log.error(f"Request error during session validation: {e}")
+                log.error(f"Request error during IAP session validation: {e}")
             except httpx.HTTPStatusError as e:
                 log.error(f"HTTP status error: {e.response.status_code} - {e.response.text}")
             except ValueError as e:
                 log.error(f"JSON decoding error: {e}")
             except Exception as e:
-                log.error(f"Unexpected error during session validation: {e}")
+                log.error(f"Unexpected error during IAP session validation: {e}")
         return False
 
 
