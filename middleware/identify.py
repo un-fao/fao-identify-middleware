@@ -242,7 +242,7 @@ class IAPSessionValidator(IdentityValidator):
             bool: True if session validation succeeds, False otherwise.
         """
         headers = {"X-Requested-With": "XMLHttpRequest", **request.headers}
-        headers = {"authorization": headers.get("authorization"), "X-Requested-With": "XMLHttpRequest"}
+        # headers = {"authorization": headers.get("authorization"), "X-Requested-With": "XMLHttpRequest"}
         log.info(f"IAP Session validation headers: {headers}")
 
         if await self._attempt_iap_session_validation(request, headers):
