@@ -241,14 +241,29 @@ class IAPSessionValidator(IdentityValidator):
         Returns:
             bool: True if session validation succeeds, False otherwise.
         """
-        headers = {"X-Requested-With": "XMLHttpRequest", **request.headers}
-        # headers = {"authorization": headers.get("authorization"), "X-Requested-With": "XMLHttpRequest"}
+        # Build headers explicitly from request headers and override the "X-Requested-With" header.
+        headers = dict(request.headers)
+        
+        # Remove headers that could cause issues with GET request
+        headers_to_remove = [
+            'content-length',
+            'content-type',
+            'origin',
+            'sec-fetch-mode',
+            'sec-fetch-site',
+            'sec-fetch-dest'
+        ]
+        for header in headers_to_remove:
+            headers.pop(header, None)
+            
+        headers["X-Requested-With"] = "XMLHttpRequest"
+
         log.info(f"IAP Session validation headers: {headers}")
 
         if await self._attempt_iap_session_validation(request, headers):
             return True
 
-        refresh=True
+        refresh = True
         log.info(f"Retrying IAP session validation with DO_SESSION_REFRESH={refresh}")
         return await self._attempt_iap_session_validation(request, headers, refresh)
 
@@ -274,11 +289,17 @@ class IAPSessionValidator(IdentityValidator):
         for key, value in request.cookies.items():
             cookies.set(key, value)
 
+        # Remove Content-Length header if present to avoid mismatch
+        headers.pop('Content-Length', None)
+        log.info(f"Request headers - _attempt_iap_session_validation(): {headers}")
+        
         async with httpx.AsyncClient(cookies=cookies, timeout=5) as client:
             try:
+                # Always use GET for identity validation regardless of original request method
                 response = await client.get(url, headers=headers)
                 log.info(f"Response status: {response.status_code}")
-                log.info(f"Response body: {response.text}")
+                log.debug(f"Response headers: {response.headers}")
+                log.debug(f"Response body: {response.text}")
                 response.raise_for_status()
                 identity = response.json()
                 log.info(f"Identity: {identity}")
