@@ -15,6 +15,7 @@
 #    Author: Carlo Cancellieri (ccancellieri@gmail.com)
 #    Company: FAO, Viale delle Terme di Caracalla, 00100 Rome, Italy
 #    Contact: copyright@fao.org - http://fao.org/contact-us/terms/en/
+
 """
 Flask Identity Middleware
 
@@ -26,44 +27,25 @@ as FastAPI applications, ensuring consistent user identity management.
 
 import logging
 import asyncio
-from models.identity import UserIdentity
-from functools import wraps
+from identify_middleware.shared.models import UserIdentity
+from identify_middleware.shared.validators import IdentityValidator
 from typing import Optional, List
 
-try:
-    from flask import Flask, request, g, session, abort
-    from werkzeug.local import LocalProxy
+from flask import Flask, request, g, session, abort
+from werkzeug.local import LocalProxy
 
-    def get_current_user() -> Optional[UserIdentity]:
-        """Helper function to get the current user identity from Flask's global context."""
-        return g.get("user")
+def get_current_user() -> Optional[UserIdentity]:
+    """Helper function to get the current user identity from Flask's global context."""
+    return g.get("user")
 
-    # Create a proxy for the current user, similar to Flask-Login's current_user
-    # The type hint helps IDEs, but the proxy itself is not a UserIdentity instance.
-    current_user: "UserIdentity" = LocalProxy(get_current_user) # type: ignore
+# Create a proxy for the current user, similar to Flask-Login's current_user
+# The type hint helps IDEs, but the proxy itself is not a UserIdentity instance.
+current_user: "UserIdentity" = LocalProxy(get_current_user) # type: ignore
 
-    def require_auth(func):
-        """Decorator to protect a Flask route, requiring an authenticated user."""
-        @wraps(func)
-        def decorated_function(*args, **kwargs):
-            if not g.get("user"):
-                abort(401, description="Authentication required")
-            return func(*args, **kwargs)
-        return decorated_function
 
-    __all__ = ["FlaskIdentifyMiddleware", "require_auth", "current_user"]
+__all__ = ["FlaskIdentifyMiddleware", , "current_user"]
 
-except ImportError:
-    # If flask is not installed, set all to None to avoid runtime errors
-    Flask, request, g, session, abort, LocalProxy = (None,) * 6
-    get_current_user, current_user = None, None
-    __all__ = []
-
-# Assuming the validators are in the parent directory's middleware module
-from .validators import IdentityValidator
-from utils.jwt_utils import IdentityException
-
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 class FlaskIdentifyMiddleware:
     """
@@ -73,7 +55,7 @@ class FlaskIdentifyMiddleware:
     to process incoming requests using a list of `IdentityValidator` instances.
     """
 
-    def __init__(self, app: Flask = None, validators: List[IdentityValidator] = None):
+    def __init__(self, app: Optional[Flask] = None, validators: List[IdentityValidator] = list()):
         self.validators = validators if validators is not None else []
         if app is not None:
             self.init_app(app)
@@ -81,7 +63,6 @@ class FlaskIdentifyMiddleware:
     def init_app(self, app: Flask):
         """
         Initializes the Flask application with the identity middleware.
-
         Args:
             app (Flask): The Flask application instance.
         """
@@ -93,7 +74,7 @@ class FlaskIdentifyMiddleware:
         
         # Ensure Flask has a session interface configured
         if not hasattr(app, 'session_interface') or app.session_interface is None:
-            log.error("Flask app does not have a session_interface configured. "
+            logger.error("Flask app does not have a session_interface configured. "
                         "FlaskIdentifyMiddleware requires a session manager. "
                         "Ensure app.secret_key is set (for default cookie sessions) "
                         "or Flask-Session is configured.")
@@ -114,25 +95,26 @@ class FlaskIdentifyMiddleware:
         # that are compatible with what the validators expect.
         for validator in self.validators:
             validator_name = validator.__class__.__name__
-            log.debug(f"Attempting Flask validation with {validator_name}.")
+            logger.debug(f"Attempting Flask validation with {validator_name}.")
             try:
                 # Flask supports async before_request handlers
                 user_identity = await validator.validate(request)
                 if user_identity:
-                    log.info(f"Flask validation succeeded with {validator_name} for {user_identity.email}.")
+                    logger.info(f"Flask validation succeeded with {validator_name} for {user_identity.email}.")
                     g.user = user_identity # Store in Flask's global context
                     session["user"] = user_identity.model_dump() # Store Pydantic model as dict in session
                     return # Validation successful, proceed with request
-                log.debug(f"Flask validation failed for {validator_name}.")
+                logger.debug(f"Flask validation failed for {validator_name}.")
             except IdentityException as e:
-                log.warning(f"IdentityException from {validator_name}: {e.detail}")
+                logger.warning(f"IdentityException from {validator_name}: {e.detail}")
                 session.pop("user", None) # Clear potentially bad session
                 abort(e.status_code, description=e.detail)
             except Exception as e:
-                log.error(f"Error during Flask validation with {validator_name}: {e}", exc_info=True)
+                logger.error(f"Error during Flask validation with {validator_name}: {e}", exc_info=True)
                 session.pop("user", None) # Clear session on unexpected error
                 abort(500, description="Internal server error during authentication.")
         
-        log.info("Unauthenticated Flask request. Treating as public access.")
+        logger.info("Unauthenticated Flask request. Treating as public access.")
         g.user = None
         session.pop("user", None) # Clear session user if no validator succeeds
+

@@ -13,6 +13,8 @@
 #    limitations under the License.
 #
 #    Author: Carlo Cancellieri (ccancellieri@gmail.com)
+#    Company: FAO, Viale delle Terme di Caracalla, 00100 Rome, Italy
+#    Contact: copyright@fao.org - http://fao.org/contact-us/terms/en/
 
 import logging
 from typing import List, Optional
@@ -20,12 +22,11 @@ from typing import List, Optional
 from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from .validators import IdentityValidator
-from utils.jwt_utils import IdentityException
-from models import UserIdentity
+from identify_middleware.shared.validators import IdentityValidator
+from identify_middleware.shared.jwt_utils import IdentityException
+from identify_middleware.shared.models import UserIdentity
 
-log = logging.getLogger(__name__)
-
+logger = logging.getLogger(__name__)
 
 class IdentifyMiddleware(BaseHTTPMiddleware):
     """
@@ -46,32 +47,32 @@ class IdentifyMiddleware(BaseHTTPMiddleware):
         
         # Ensure session middleware is running
         if "session" not in request.scope:
-            log.error("SessionMiddleware not detected. IdentifyMiddleware requires an upstream session middleware.")
+            logger.error("SessionMiddleware not detected. IdentifyMiddleware requires an upstream session middleware.")
             raise RuntimeError("IdentifyMiddleware requires SessionMiddleware to be installed.")
 
         for validator in self.validators:
             validator_name = validator.__class__.__name__
-            log.debug(f"Attempting validation with {validator_name}.")
+            logger.debug(f"Attempting validation with {validator_name}.")
             try:
                 user_identity: Optional[UserIdentity] = await validator.validate(request)
                 if user_identity:
-                    log.info(f"Validation succeeded with {validator_name} for {user_identity.email}.")
+                    logger.info(f"Validation succeeded with {validator_name} for {user_identity.email}.")
                     request.state.user = user_identity # Store in request.state for current request
                     request.session["user"] = user_identity.model_dump() # Store Pydantic model as dict in session
                     return await call_next(request)
-                log.debug(f"Validation failed for {validator_name}.")
+                logger.debug(f"Validation failed for {validator_name}.")
             except IdentityException as e:
-                log.warning(f"IdentityException from {validator_name}: {e.detail}")
+                logger.warning(f"IdentityException from {validator_name}: {e.detail}")
                 # Clear potentially bad session data if validation fails
                 request.session.pop("user", None)
                 raise HTTPException(status_code=e.status_code, detail=e.detail) from e
             except Exception as e:
-                log.error(f"Error during validation with {validator_name}: {e}", exc_info=True)
+                logger.error(f"Error during validation with {validator_name}: {e}", exc_info=True)
                 # Clear session on unexpected error
                 request.session.pop("user", None)
                 raise HTTPException(status_code=500, detail="Internal server error during authentication.") from e
         
-        log.info("Unauthenticated request. Treating as public access.")
+        logger.info("Unauthenticated request. Treating as public access.")
         # Ensure user is cleared from state and session if all validators fail
         request.state.user = None
         request.session.pop("user", None)

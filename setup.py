@@ -25,7 +25,8 @@ setup(
     description="Identify Middleware for GCP Applications",
     author="Carlo Cancellieri",
     author_email="ccancellieri@gmail.com",
-    packages=find_packages(),
+    package_dir={"": "src"},
+    packages=find_packages(where="src"),
     # Core dependencies that are always required
     install_requires=[
         "httpx>=0.27.0",
