@@ -17,10 +17,11 @@
 #    Contact: copyright@fao.org - http://fao.org/contact-us/terms/en/
 
 # setup.py
+
 from setuptools import setup, find_packages
 
 setup(
-    name="identify-middleware",
+    name="identify_middleware",
     version="0.2.0", # Bumped version for new features
     description="Identify Middleware for GCP Applications",
     author="Carlo Cancellieri",
