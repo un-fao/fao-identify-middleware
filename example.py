@@ -99,9 +99,9 @@ if __name__ == "__main__":
     import logging
     logging.basicConfig(level=logging.INFO)
     log = logging.getLogger()
-    log.info("Starting FastAPI server with CookieBackend session...")
-    log.info(f"IAP Audience configured for: {GCP_IAP_AUDIENCE}")
+    logger.info("Starting FastAPI server with CookieBackend session...")
+    logger.info(f"IAP Audience configured for: {GCP_IAP_AUDIENCE}")
     if GCP_IAP_AUDIENCE == "/projects/123456789/apps/my-gcp-project-id":
-        log.warning("Using placeholder IAP Audience. Update GCP_IAP_AUDIENCE to test IAP.")
+        logger.warning("Using placeholder IAP Audience. Update GCP_IAP_AUDIENCE to test IAP.")
     
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -30,7 +30,7 @@ from utils.jwt_utils import (
     IdentityException,
 )
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 
 # Type hint for the custom auth callable
@@ -75,15 +75,15 @@ class SessionPersistenceValidator(IdentityValidator):
                 check_token_expiration(
                     user_identity.model_dump(), self.expiration_threshold
                 )
-                log.info(
+                logger.info(
                     f"Session persistence validation succeeded for: {user_identity.email}"
                 )
                 return user_identity
             except IdentityException:
-                log.info("Session token expired; revalidation needed.")
+                logger.info("Session token expired; revalidation needed.")
                 request.session.pop("user", None)  # Clear expired session
             except Exception as e:
-                log.warning(f"Could not parse UserIdentity from session: {e}")
+                logger.warning(f"Could not parse UserIdentity from session: {e}")
                 request.session.pop("user", None) # Clear malformed data
         return None
 
@@ -113,18 +113,18 @@ class Oauth2Validator(IdentityValidator):
                     claims=claims,
                     token=token,
                 )
-                log.info(
+                logger.info(
                     f"OAuth2 token validation succeeded for email: {user_identity.email}"
                 )
                 return user_identity
             # No claims found is not an error, just not validated
-            log.debug("OAuth2 token validation: No valid Bearer token found.")
+            logger.debug("OAuth2 token validation: No valid Bearer token found.")
         except Exception as e:
             # IdentityException will be caught by middleware, other exceptions logged
             if not isinstance(e, IdentityException):
-                log.error(f"OAuth2 token validation failed: {e}")
+                logger.error(f"OAuth2 token validation failed: {e}")
             else:
-                log.info(f"OAuth2 token validation failed: {e.detail}")
+                logger.info(f"OAuth2 token validation failed: {e.detail}")
         return None
 
 
@@ -152,7 +152,7 @@ class StaticAPIKeyValidator(IdentityValidator):
             self.key_map = key_or_map
 
         self.header_key = header_key
-        log.info(f"StaticAPIKeyValidator initialized for header '{header_key}'.")
+        logger.info(f"StaticAPIKeyValidator initialized for header '{header_key}'.")
 
     async def validate(self, request: "Request") -> Optional[UserIdentity]:
         key_from_header = request.headers.get(self.header_key)
@@ -164,7 +164,7 @@ class StaticAPIKeyValidator(IdentityValidator):
         user_email = self.key_map.get(key_from_header)
 
         if user_email:
-            log.info(f"Static API Key validation succeeded for user: {user_email}")
+            logger.info(f"Static API Key validation succeeded for user: {user_email}")
             # Create a token with a very long expiration (e.g., 10 years)
             far_future_exp = int(time.time() + 315360000)
             user_identity = UserIdentity(
@@ -182,7 +182,7 @@ class StaticAPIKeyValidator(IdentityValidator):
             )
             return user_identity
         
-        log.debug("Static API Key validation failed: Key not found.")
+        logger.debug("Static API Key validation failed: Key not found.")
         return None
 
 
@@ -204,7 +204,7 @@ class CustomTokenValidator(IdentityValidator):
         # Normalize scheme to "bearer " (lowercase, with space) or None
         self.scheme = scheme.lower().strip() + " " if scheme else None
         self.scheme_len = len(self.scheme) if self.scheme else 0
-        log.info(f"CustomTokenValidator initialized for header '{header_key}'.")
+        logger.info(f"CustomTokenValidator initialized for header '{header_key}'.")
 
 
     async def validate(self, request: "Request") -> Optional[UserIdentity]:
@@ -217,20 +217,20 @@ class CustomTokenValidator(IdentityValidator):
         token: str
         if self.scheme:
             if not token_from_header.lower().startswith(self.scheme):
-                log.debug(f"Custom token validation failed: Invalid scheme.")
+                logger.debug(f"Custom token validation failed: Invalid scheme.")
                 return None
             token = token_from_header[self.scheme_len :]
         else:
             token = token_from_header
 
         if not token:
-            log.debug("Custom token validation failed: No token provided after scheme processing.")
+            logger.debug("Custom token validation failed: No token provided after scheme processing.")
             return None
 
         try:
             user_identity = await self.auth_callable(token)
             if user_identity:
-                log.info(
+                logger.info(
                     f"CustomTokenValidator succeeded for user: {user_identity.email}"
                 )
                 # Ensure the token is stored in the identity if not already
@@ -238,11 +238,11 @@ class CustomTokenValidator(IdentityValidator):
                     user_identity.token = token
                 return user_identity
         except Exception as e:
-            log.error(f"Error in CustomTokenValidator auth_callable: {e}")
+            logger.error(f"Error in CustomTokenValidator auth_callable: {e}")
             # Depending on policy, you might want to re-raise as IdentityException
             # raise IdentityException(status_code=500, detail="Auth service error")
 
-        log.debug("Custom token validation failed: Callable returned None.")
+        logger.debug("Custom token validation failed: Callable returned None.")
         return None
 
 
@@ -266,13 +266,13 @@ class IAPTokenValidator(IdentityValidator):
         self.audience = audience
         self.authorization_header_key = authorization_header_key
         get_iap_public_keys()  # Cache keys on startup
-        log.info(f"IAPTokenValidator initialized for header '{authorization_header_key}'.")
+        logger.info(f"IAPTokenValidator initialized for header '{authorization_header_key}'.")
 
 
     async def validate(self, request: "Request") -> Optional[UserIdentity]:
         apikey = request.headers.get(self.authorization_header_key)
         if apikey:
-            log.debug("IAP token (X-Goog-Iap-Jwt-Assertion) detected in request headers.")
+            logger.debug("IAP token (X-Goog-Iap-Jwt-Assertion) detected in request headers.")
             try:
                 decoded_jwt = verify_iap_jwt(apikey, self.audience)
                 user_identity = UserIdentity(
@@ -283,14 +283,14 @@ class IAPTokenValidator(IdentityValidator):
                     provider="google-iap-token",
                     token=apikey,
                 )
-                log.info(
+                logger.info(
                     f"IAP token validation succeeded for: {user_identity.email}"
                 )
                 return user_identity
             except IdentityException as e:
-                log.info(f"IAP token validation failed: {e.detail}")
+                logger.info(f"IAP token validation failed: {e.detail}")
             except Exception as e:
-                log.error(f"IAP token validation failed with unexpected error: {e}")
+                logger.error(f"IAP token validation failed with unexpected error: {e}")
         return None
 
 
@@ -309,12 +309,12 @@ class IAPCookieValidator(IdentityValidator):
     def __init__(self, audience: str):
         self.audience = audience
         get_iap_public_keys()  # Cache keys on startup
-        log.info("IAPCookieValidator initialized.")
+        logger.info("IAPCookieValidator initialized.")
 
     async def validate(self, request: "Request") -> Optional[UserIdentity]:
         iap_cookie = request.cookies.get("GCP_IAP_UID")
         if iap_cookie:
-            log.debug("GCP_IAP_UID cookie detected in request.")
+            logger.debug("GCP_IAP_UID cookie detected in request.")
             try:
                 decoded_jwt = verify_iap_cookie_jwt(iap_cookie, self.audience)
                 user_identity = UserIdentity(
@@ -325,12 +325,12 @@ class IAPCookieValidator(IdentityValidator):
                     provider="google-iap-cookie",
                     token=iap_cookie,
                 )
-                log.info(
+                logger.info(
                     f"IAP cookie validation succeeded for: {user_identity.email}"
                 )
                 return user_identity
             except IdentityException as e:
-                log.info(f"IAP cookie validation failed: {e.detail}")
+                logger.info(f"IAP cookie validation failed: {e.detail}")
             except Exception as e:
-                log.error(f"IAP cookie validation failed with unexpected error: {e}")
+                logger.error(f"IAP cookie validation failed with unexpected error: {e}")
         return None

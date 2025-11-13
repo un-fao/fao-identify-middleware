@@ -36,7 +36,7 @@ except ImportError:
     id_token = None
     requests = None
 
-log = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 class IdentityException(Exception):
     """Custom exception for identity validation errors, independent of web framework."""
@@ -97,7 +97,7 @@ def verify_iap_jwt(iap_jwt: str, audience: str) -> dict:
         decoded_jwt = verify_oauth2_token(
             id_token=iap_jwt, request=google_request, audience=audience
         )
-        log.debug(f"Decoded IAP token: {decoded_jwt}")
+        logger.debug(f"Decoded IAP token: {decoded_jwt}")
 
         return decoded_jwt
 
@@ -107,7 +107,7 @@ def verify_iap_jwt(iap_jwt: str, audience: str) -> dict:
             status_code=403, detail=f"Unauthorized: Invalid IAP token ({str(e)})"
         ) from e
     except Exception as e:
-        log.error(f"Unexpected error during IAP JWT validation: {e}")
+        logger.error(f"Unexpected error during IAP JWT validation: {e}")
         raise IdentityException(status_code=500, detail="An unexpected error occurred during IAP token validation.") from e
 
 @lru_cache(maxsize=1)
@@ -123,20 +123,20 @@ def get_iap_public_keys() -> dict:
         IdentityException: If there's an error fetching the keys.
     """
     try:
-        log.info(f"Fetching IAP public keys from {IAP_PUBLIC_KEYS_URL}")
+        logger.info(f"Fetching IAP public keys from {IAP_PUBLIC_KEYS_URL}")
         # Use synchronous httpx.Client for fetching keys, as this function
         # is called at startup.
         with httpx.Client(timeout=10) as client:
             response = client.get(IAP_PUBLIC_KEYS_URL)
             response.raise_for_status()
         keys = response.json()
-        log.info("Successfully fetched IAP public keys.")
+        logger.info("Successfully fetched IAP public keys.")
         return keys
     except httpx.RequestError as e:
-        log.error(f"Error fetching IAP public keys: {e}")
+        logger.error(f"Error fetching IAP public keys: {e}")
         raise IdentityException(status_code=500, detail="Could not fetch IAP public keys.") from e
     except Exception as e:
-        log.error(f"Unexpected error fetching IAP public keys: {e}")
+        logger.error(f"Unexpected error fetching IAP public keys: {e}")
         raise IdentityException(status_code=500, detail="An unexpected error occurred while fetching IAP public keys.") from e
 
 
@@ -165,13 +165,13 @@ def verify_iap_cookie_jwt(iap_jwt_cookie: str, audience: str) -> dict:
             audience=audience,
             options={"verify_exp": True, "verify_aud": True}
         )
-        log.debug(f"Decoded IAP cookie token: {decoded_jwt}")
+        logger.debug(f"Decoded IAP cookie token: {decoded_jwt}")
         return decoded_jwt
     except exceptions.JWTError as e:
-        log.warning(f"IAP cookie JWT validation failed: {e}")
+        logger.warning(f"IAP cookie JWT validation failed: {e}")
         raise IdentityException(status_code=403, detail=f"Unauthorized: Invalid IAP cookie token ({str(e)})") from e
     except Exception as e:
-        log.error(f"Unexpected error during IAP cookie JWT validation: {e}")
+        logger.error(f"Unexpected error during IAP cookie JWT validation: {e}")
         raise IdentityException(status_code=500, detail="An unexpected error occurred during IAP cookie JWT validation.") from e
 
 
@@ -196,7 +196,7 @@ def receive_authorized_get_request(request: Any) -> Optional[dict]:
             # split the auth type and value from the header.
             auth_type, creds = auth_header.split(" ", 1)
         except ValueError:
-            log.debug("Invalid Authorization header format. Expected 'Bearer <token>'.")
+            logger.debug("Invalid Authorization header format. Expected 'Bearer <token>'.")
             return None # Not a Bearer token, or malformed
 
         if auth_type.lower() == "bearer":
@@ -204,7 +204,7 @@ def receive_authorized_get_request(request: Any) -> Optional[dict]:
                 # verify_oauth2_token checks expiration, signature, and issuer
                 # for Google-issued ID tokens.
                 claims = id_token.verify_oauth2_token(creds, requests.Request())
-                log.debug(f"Decoded OAuth2 Bearer token claims: {claims}")
+                logger.debug(f"Decoded OAuth2 Bearer token claims: {claims}")
                 
                 if "email" not in claims and "sub" in claims:
                     claims["email"] = claims["sub"] # Use 'sub' as 'email' if 'email' is missing
@@ -216,10 +216,10 @@ def receive_authorized_get_request(request: Any) -> Optional[dict]:
                 return claims
             except ValueError as e:
                 # This catches expired tokens, invalid signatures, wrong issuer, etc.
-                log.info(f"OAuth2 Bearer token validation failed: {e}")
+                logger.info(f"OAuth2 Bearer token validation failed: {e}")
                 raise IdentityException(status_code=401, detail=f"Invalid Bearer token: {e}") from e
             except Exception as e:
-                log.error(f"Unexpected error during OAuth2 token validation: {e}")
+                logger.error(f"Unexpected error during OAuth2 token validation: {e}")
                 raise IdentityException(status_code=500, detail="Unexpected error validating Bearer token.") from e
 
     return None
