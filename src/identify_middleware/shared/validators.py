@@ -20,8 +20,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import Optional, Callable, Awaitable, Union, Mapping, Any
 
-from models.identity import UserIdentity
-from utils.jwt_utils import (
+from identify_middleware.shared.models import UserIdentity
+from identify_middleware.shared.jwt_utils import (
     get_iap_public_keys,
     verify_iap_cookie_jwt,
     check_token_expiration,
@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 # Type hint for the custom auth callable
 # It takes a token string and returns a UserIdentity or None
 AuthCallable = Callable[[str], Awaitable[Optional[UserIdentity]]]
-
 
 class IdentityValidator(ABC):
     """
