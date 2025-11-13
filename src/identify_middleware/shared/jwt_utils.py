@@ -97,7 +97,7 @@ def verify_iap_jwt(iap_jwt: str, audience: str) -> dict:
         decoded_jwt = verify_oauth2_token(
             id_token=iap_jwt, request=google_request, audience=audience
         )
-        logger.debug(f"Decoded IAP token: {decoded_jwt}")
+        # logger.debug(f"Decoded IAP token: {decoded_jwt}")
 
         return decoded_jwt
 
@@ -165,7 +165,7 @@ def verify_iap_cookie_jwt(iap_jwt_cookie: str, audience: str) -> dict:
             audience=audience,
             options={"verify_exp": True, "verify_aud": True}
         )
-        logger.debug(f"Decoded IAP cookie token: {decoded_jwt}")
+        # logger.debug(f"Decoded IAP cookie token: {decoded_jwt}")
         return decoded_jwt
     except exceptions.JWTError as e:
         logger.warning(f"IAP cookie JWT validation failed: {e}")
@@ -204,7 +204,7 @@ def receive_authorized_get_request(request: Any) -> Optional[dict]:
                 # verify_oauth2_token checks expiration, signature, and issuer
                 # for Google-issued ID tokens.
                 claims = id_token.verify_oauth2_token(creds, requests.Request())
-                logger.debug(f"Decoded OAuth2 Bearer token claims: {claims}")
+                # logger.debug(f"Decoded OAuth2 Bearer token claims: {claims}")
                 
                 if "email" not in claims and "sub" in claims:
                     claims["email"] = claims["sub"] # Use 'sub' as 'email' if 'email' is missing
