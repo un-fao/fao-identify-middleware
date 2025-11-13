@@ -13,5 +13,14 @@
 #    limitations under the License.
 #
 #    Author: Carlo Cancellieri (ccancellieri@gmail.com)
-#    Company: FAO, Viale delle Terme di Caracalla, 00100 Rome, Italy
-#    Contact: copyright@fao.org - http://fao.org/contact-us/terms/en/
+
+from typing import Optional, Dict, Any
+from pydantic import BaseModel, Field
+
+class UserIdentity(BaseModel):
+    id: str = Field(..., description="Unique user identifier, typically from the 'sub' claim.")
+    email: str = Field(..., description="User's email address.")
+    exp: int = Field(..., description="Expiration timestamp (Unix epoch).")
+    provider: str = Field(..., description="The authentication provider that validated the identity (e.g., 'google-iap', 'oauth2').")
+    claims: Dict[str, Any] = Field(..., description="All claims from the token.")
+    token: Optional[str] = Field(None, description="The raw token, if available.")

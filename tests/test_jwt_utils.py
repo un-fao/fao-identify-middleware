@@ -19,45 +19,45 @@
 # tests/test_jwt_utils.py
 import pytest
 import time
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+import httpx
+from jose import jwt, exceptions
 
-from fastapi import HTTPException
-
-from utils.jwt_utils import check_token_expiration, verify_iap_jwt
-
-
-# Mock utility functions
-def mock_verify_iap_jwt(apikey, audience):
-    if apikey == "valid-api-key" and audience == "/projects/123/apps/test-app":
-        return {"exp": time.time() + 3600}
-    raise HTTPException(status_code=401, detail="Invalid API key or audience")
+from utils.jwt_utils import (
+    check_token_expiration, 
+    verify_iap_jwt, 
+    verify_iap_cookie_jwt, 
+    get_iap_public_keys, 
+    receive_authorized_get_request,
+    IdentityException
+)
 
 
 # Tests for `check_token_expiration`
 def test_valid_token():
     decoded_jwt = {"exp": time.time() + 3600}
     try:
-        check_token_expiration(decoded_jwt)
-    except HTTPException:
-        pytest.fail("HTTPException was raised for a valid token.")
+        check_token_expiration(decoded_jwt) # type: ignore
+    except IdentityException:
+        pytest.fail("IdentityException was raised for a valid token.")
 
 
 def test_nearing_expiration_token():
     decoded_jwt = {"exp": time.time() + 200}
-    with pytest.raises(HTTPException, match="Token expired or nearing expiration."):
-        check_token_expiration(decoded_jwt, threshold=300)
+    with pytest.raises(IdentityException, match="Token expired or nearing expiration."):
+        check_token_expiration(decoded_jwt, threshold=300) # type: ignore
 
 
 def test_expired_token():
     decoded_jwt = {"exp": time.time() - 10}
-    with pytest.raises(HTTPException, match="Token expired or nearing expiration."):
-        check_token_expiration(decoded_jwt)
+    with pytest.raises(IdentityException, match="Token expired or nearing expiration."):
+        check_token_expiration(decoded_jwt) # type: ignore
 
 
 def test_missing_exp_claim():
     decoded_jwt = {}
-    with pytest.raises(HTTPException, match="Token does not have an expiration claim"):
-        check_token_expiration(decoded_jwt)
+    with pytest.raises(IdentityException, match="Token does not have an expiration claim"):
+        check_token_expiration(decoded_jwt) # type: ignore
 
 
 # Tests for `verify_iap_jwt`
@@ -72,14 +72,114 @@ def test_verify_iap_jwt_success(mock_google_request, mock_verify_oauth2_token):
 @patch("utils.jwt_utils.verify_oauth2_token")
 @patch("utils.jwt_utils.GoogleAuthRequest")
 def test_verify_iap_jwt_expired(mock_google_request, mock_verify_oauth2_token):
-    mock_verify_oauth2_token.return_value = {"exp": time.time() - 10}
-    with pytest.raises(HTTPException, match="Unauthorized: Token has expired"):
+    mock_verify_oauth2_token.side_effect = ValueError("Token has expired")
+    with pytest.raises(IdentityException, match="Unauthorized: Invalid IAP token"):
         verify_iap_jwt("expired-token", "test-audience")
 
 
 @patch("utils.jwt_utils.verify_oauth2_token")
 @patch("utils.jwt_utils.GoogleAuthRequest")
 def test_verify_iap_jwt_invalid_token(mock_google_request, mock_verify_oauth2_token):
-    mock_verify_oauth2_token.side_effect = ValueError("Invalid token")
-    with pytest.raises(HTTPException, match="Unauthorized: Invalid token"):
+    mock_verify_oauth2_token.side_effect = ValueError("Signature verification failed")
+    with pytest.raises(IdentityException, match="Unauthorized: Invalid IAP token"):
         verify_iap_jwt("invalid-token", "test-audience")
+
+
+# Tests for `get_iap_public_keys`
+@patch("utils.jwt_utils.httpx.Client")
+def test_get_iap_public_keys_success(mock_client):
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {"key1": "value1"}
+    mock_response.raise_for_status.return_value = None
+    
+    mock_client.return_value.__enter__.return_value.get.return_value = mock_response
+
+    # Clear cache before test
+    get_iap_public_keys.cache_clear()
+    
+    keys = get_iap_public_keys()
+    assert keys == {"key1": "value1"}
+    mock_client.return_value.__enter__.return_value.get.assert_called_once_with("https://www.gstatic.com/iap/verify/public_keys")
+
+    # Test caching
+    keys_cached = get_iap_public_keys()
+    assert keys_cached == {"key1": "value1"}
+    # Assert get was still only called once
+    mock_client.return_value.__enter__.return_value.get.assert_called_once()
+
+
+@patch("utils.jwt_utils.httpx.Client")
+def test_get_iap_public_keys_failure(mock_client):
+    mock_client.return_value.__enter__.return_value.get.side_effect = httpx.RequestError("Network error", request=Mock())
+    
+    # Clear cache before test
+    get_iap_public_keys.cache_clear()
+
+    with pytest.raises(IdentityException, match="Could not fetch IAP public keys."):
+        get_iap_public_keys()
+    
+    get_iap_public_keys.cache_clear()
+
+
+# Tests for `verify_iap_cookie_jwt`
+@patch("utils.jwt_utils.get_iap_public_keys")
+@patch("utils.jwt_utils.jwt.decode")
+def test_verify_iap_cookie_jwt_success(mock_jwt_decode, mock_get_iap_public_keys):
+    mock_get_iap_public_keys.return_value = {"keys": []}
+    mock_jwt_decode.return_value = {"email": "test@example.com", "exp": time.time() + 3600}
+
+    decoded_jwt = verify_iap_cookie_jwt("valid-cookie-jwt", "test-audience")
+    assert decoded_jwt["email"] == "test@example.com"
+    mock_jwt_decode.assert_called_once()
+
+
+@patch("utils.jwt_utils.get_iap_public_keys")
+@patch("utils.jwt_utils.jwt.decode")
+def test_verify_iap_cookie_jwt_invalid(mock_jwt_decode, mock_get_iap_public_keys):
+    mock_get_iap_public_keys.return_value = {"keys": []}
+    mock_jwt_decode.side_effect = exceptions.JWTError("Invalid signature")
+
+    with pytest.raises(IdentityException, match="Unauthorized: Invalid IAP cookie token"):
+        verify_iap_cookie_jwt("invalid-cookie-jwt", "test-audience")
+
+
+# Tests for `receive_authorized_get_request`
+@patch("utils.jwt_utils.id_token.verify_oauth2_token")
+@patch("utils.jwt_utils.requests.Request")
+def test_receive_auth_get_request_success(mock_google_request, mock_verify_oauth2_token):
+    mock_request = Mock()
+    mock_request.headers = {"Authorization": "Bearer valid-token"}
+    mock_verify_oauth2_token.return_value = {"email": "user@example.com", "exp": time.time() + 3600}
+
+    claims = receive_authorized_get_request(mock_request)
+    assert claims["email"] == "user@example.com"
+
+
+@patch("utils.jwt_utils.id_token.verify_oauth2_token")
+@patch("utils.jwt_utils.requests.Request")
+def test_receive_auth_get_request_expired(mock_google_request, mock_verify_oauth2_token):
+    mock_request = Mock()
+    mock_request.headers = {"Authorization": "Bearer expired-token"}
+    mock_verify_oauth2_token.side_effect = ValueError("Token has expired")
+
+    with pytest.raises(IdentityException, match="Invalid Bearer token: Token has expired"):
+        receive_authorized_get_request(mock_request)
+
+
+def test_receive_auth_get_request_no_header():
+    mock_request = Mock()
+    mock_request.headers = {}
+    assert receive_authorized_get_request(mock_request) is None
+
+
+def test_receive_auth_get_request_wrong_scheme():
+    mock_request = Mock()
+    mock_request.headers = {"Authorization": "Basic some-creds"}
+    assert receive_authorized_get_request(mock_request) is None
+
+
+def test_receive_auth_get_request_malformed_header():
+    mock_request = Mock()
+    mock_request.headers = {"Authorization": "Bearer"} # Missing token
+    assert receive_authorized_get_request(mock_request) is None
