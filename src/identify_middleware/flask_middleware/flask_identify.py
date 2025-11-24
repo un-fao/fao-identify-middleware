@@ -21,12 +21,9 @@ Flask Identity Middleware
 
 This module provides a Flask-compatible identity middleware that integrates
 with the IdentityValidator classes.
-It allows Flask applications to use the same authentication mechanisms
-as FastAPI applications, ensuring consistent user identity management.
 """
 
 import logging
-import asyncio
 from identify_middleware.shared.models import UserIdentity
 from identify_middleware.shared.validators import IdentityValidator
 from typing import Optional, List
@@ -34,87 +31,94 @@ from typing import Optional, List
 from flask import Flask, request, g, session, abort
 from werkzeug.local import LocalProxy
 
+try:
+    from asgiref.sync import async_to_sync
+except ImportError:
+    async_to_sync = None
+
 def get_current_user() -> Optional[UserIdentity]:
     """Helper function to get the current user identity from Flask's global context."""
     return g.get("user")
 
-# Create a proxy for the current user, similar to Flask-Login's current_user
-# The type hint helps IDEs, but the proxy itself is not a UserIdentity instance.
 current_user: "UserIdentity" = LocalProxy(get_current_user) # type: ignore
 
-
-__all__ = ["FlaskIdentifyMiddleware", , "current_user"]
+__all__ = ["FlaskIdentifyMiddleware", "current_user"]
 
 logger = logging.getLogger(__name__)
 
 class FlaskIdentifyMiddleware:
     """
     Flask-compatible middleware to validate user identity.
-
-    This class registers a `before_request` handler with the Flask application
-    to process incoming requests using a list of `IdentityValidator` instances.
     """
 
-    def __init__(self, app: Optional[Flask] = None, validators: List[IdentityValidator] = list()):
+    def __init__(self, app: Optional[Flask] = None, validators: List[IdentityValidator] = None):
         self.validators = validators if validators is not None else []
         if app is not None:
             self.init_app(app)
 
     def init_app(self, app: Flask):
-        """
-        Initializes the Flask application with the identity middleware.
-        Args:
-            app (Flask): The Flask application instance.
-        """
         if not Flask:
             raise ImportError(
-                "The 'flask' library is required to use FlaskIdentifyMiddleware. "
-                "Please install it with `pip install identify-middleware[flask]`."
+                "The 'flask' library is required. Install with `pip install identify-middleware[flask]`."
             )
         
-        # Ensure Flask has a session interface configured
+        # FIX: Use asgiref for robust async execution
+        if not async_to_sync:
+            logger.warning("The 'asgiref' library is recommended for Flask middleware stability. "
+                           "Install with `pip install asgiref`.")
+
         if not hasattr(app, 'session_interface') or app.session_interface is None:
-            logger.error("Flask app does not have a session_interface configured. "
-                        "FlaskIdentifyMiddleware requires a session manager. "
-                        "Ensure app.secret_key is set (for default cookie sessions) "
-                        "or Flask-Session is configured.")
-            raise RuntimeError("FlaskIdentifyMiddleware requires a session interface to be configured.")
+            logger.error("Flask app requires a session_interface. Ensure secret_key is set.")
+            raise RuntimeError("FlaskIdentifyMiddleware requires a session interface.")
 
         app.before_request(self._before_request_handler)
-
 
     def _before_request_handler(self):
         """
         Handler executed before each request to validate user identity.
         """
-        # Run the async validation logic in a sync context
-        asyncio.run(self._validate_request())
+        # FIX: Use async_to_sync to handle the async validators in Flask's sync context safely
+        if async_to_sync:
+            async_to_sync(self._validate_request)()
+        else:
+            import asyncio
+            # Fallback: simple run, but dangerous if nested in another loop
+            try:
+                loop = asyncio.get_running_loop()
+                # If we are already in a loop (e.g. uvicorn), this will fail with RuntimeError
+                # This is why asgiref is preferred.
+                if loop.is_running():
+                     loop.create_task(self._validate_request())
+                     return 
+            except RuntimeError:
+                pass
+            asyncio.run(self._validate_request())
 
     async def _validate_request(self):
-        # Flask's request object has .headers, .cookies, and session attributes
-        # that are compatible with what the validators expect.
         for validator in self.validators:
             validator_name = validator.__class__.__name__
             logger.debug(f"Attempting Flask validation with {validator_name}.")
             try:
-                # Flask supports async before_request handlers
                 user_identity = await validator.validate(request)
                 if user_identity:
                     logger.info(f"Flask validation succeeded with {validator_name} for {user_identity.email}.")
-                    g.user = user_identity # Store in Flask's global context
-                    session["user"] = user_identity.model_dump() # Store Pydantic model as dict in session
-                    return # Validation successful, proceed with request
+                    g.user = user_identity
+                    
+                    # FIX: Session Size Optimization
+                    # Only store minimal data in the cookie to prevent overflow (4KB limit)
+                    session_data = user_identity.model_dump(include={'id', 'email', 'exp', 'provider'})
+                    session["user"] = session_data
+                    
+                    return
                 logger.debug(f"Flask validation failed for {validator_name}.")
-            except IdentityException as e:
-                logger.warning(f"IdentityException from {validator_name}: {e.detail}")
-                session.pop("user", None) # Clear potentially bad session
-                abort(e.status_code, description=e.detail)
             except Exception as e:
-                logger.error(f"Error during Flask validation with {validator_name}: {e}", exc_info=True)
-                session.pop("user", None) # Clear session on unexpected error
-                abort(500, description="Internal server error during authentication.")
+                # IdentifyException or other errors
+                detail = getattr(e, "detail", "Authentication error")
+                status = getattr(e, "status_code", 500)
+                logger.warning(f"Validation error from {validator_name}: {detail}")
+                session.pop("user", None)
+                abort(status, description=detail)
         
         logger.info("Unauthenticated Flask request. Treating as public access.")
         g.user = None
-        session.pop("user", None) # Clear session user if no validator succeeds
-
+        session.pop("user", None)

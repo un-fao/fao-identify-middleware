@@ -30,80 +30,85 @@ from identify_middleware.shared.jwt_utils import (
     IdentityException,
 )
 
+# Import google auth components if available for the robust cookie validator fix
+try:
+    from google.oauth2.id_token import verify_oauth2_token
+    from google.auth.transport import requests as google_requests
+    HAS_GOOGLE_AUTH = True
+except ImportError:
+    HAS_GOOGLE_AUTH = False
+    verify_oauth2_token = None
+    google_requests = None
+
 logger = logging.getLogger(__name__)
 
-
-# Type hint for the custom auth callable
-# It takes a token string and returns a UserIdentity or None
 AuthCallable = Callable[[str], Awaitable[Optional[UserIdentity]]]
 
 class IdentityValidator(ABC):
     """
     Abstract base class for identity validators.
-    All validators must implement the `validate` method.
     """
 
     @abstractmethod
-    async def validate(self, request: "Request") -> Optional[UserIdentity]:
+    # FIX: Type Hinting
+    # Use 'Any' for request to support both FastAPI and Flask Requests without hard dependencies
+    async def validate(self, request: Any) -> Optional[UserIdentity]:
         """
         Validate the request for user authentication.
         Args:
             request: The incoming web framework request object (FastAPI or Flask).
-        Returns:
-            Optional[UserIdentity]: The UserIdentity object if validation succeeds, None otherwise.
         """
         pass
 
 
 class SessionPersistenceValidator(IdentityValidator):
-    """
-    Validator for checking in-memory session identity.
-    This should be the *first* validator in the list for performance.
-    It relies on an upstream session middleware (e.g., StarletteSessionMiddleware
-    or Flask-Session) to populate `request.session`.
-    """
-
     def __init__(self, expiration_threshold: int = 300):
         self.expiration_threshold = expiration_threshold
 
-    async def validate(self, request: "Request") -> Optional[UserIdentity]:
-        user_identity_data = request.session.get("user")
+    async def validate(self, request: Any) -> Optional[UserIdentity]:
+        # Works for both Flask and Starlette/FastAPI sessions
+        session = getattr(request, "session", {})
+        user_identity_data = session.get("user")
+        
         if user_identity_data and isinstance(user_identity_data, dict):
             try:
+                # If we optimized storage, we might be missing 'claims' in the session.
+                # We inject empty claims if missing to satisfy Pydantic if necessary,
+                # or we assume the model makes them optional (checked in models.py).
+                if "claims" not in user_identity_data:
+                    user_identity_data["claims"] = {} 
+
                 user_identity = UserIdentity(**user_identity_data)
                 check_token_expiration(
                     user_identity.model_dump(), self.expiration_threshold
                 )
-                logger.info(
-                    f"Session persistence validation succeeded for: {user_identity.email}"
-                )
                 return user_identity
             except IdentityException:
-                logger.info("Session token expired; revalidation needed.")
-                request.session.pop("user", None)  # Clear expired session
+                if isinstance(session, dict): session.pop("user", None)
+                else: del session["user"]
             except Exception as e:
                 logger.warning(f"Could not parse UserIdentity from session: {e}")
-                request.session.pop("user", None) # Clear malformed data
+                if isinstance(session, dict): session.pop("user", None)
+                else: del session["user"]
         return None
 
 
 class Oauth2Validator(IdentityValidator):
-    """
-    Validator for Google OAuth2 / OIDC Bearer tokens.
-    It validates a Google-issued ID token sent in the `Authorization` header.
-    """
+    def __init__(self):
+        # FIX: Dependency Check
+        if not HAS_GOOGLE_AUTH:
+            raise ImportError("google-auth library required for Oauth2Validator. pip install google-auth")
 
-    async def validate(self, request: "Request") -> Optional[UserIdentity]:
+    async def validate(self, request: Any) -> Optional[UserIdentity]:
         try:
-            # receive_authorized_get_request handles Google ID token verification
             claims = receive_authorized_get_request(request)
             if claims and "email" in claims and "exp" in claims:
-                auth_header = request.headers.get("Authorization")
-                token = (
-                    auth_header.split(" ", 1)[1]
-                    if auth_header and " " in auth_header
-                    else None
-                )
+                # Extract raw token for record keeping
+                auth_header = request.headers.get("Authorization", "")
+                token = None
+                if " " in auth_header:
+                    token = auth_header.split(" ", 1)[1]
+                
                 user_identity = UserIdentity(
                     id=claims.get("sub", claims["email"]),
                     email=claims["email"],
@@ -112,14 +117,8 @@ class Oauth2Validator(IdentityValidator):
                     claims=claims,
                     token=token,
                 )
-                logger.info(
-                    f"OAuth2 token validation succeeded for email: {user_identity.email}"
-                )
                 return user_identity
-            # No claims found is not an error, just not validated
-            logger.debug("OAuth2 token validation: No valid Bearer token found.")
         except Exception as e:
-            # IdentityException will be caught by middleware, other exceptions logged
             if not isinstance(e, IdentityException):
                 logger.error(f"OAuth2 token validation failed: {e}")
             else:
@@ -128,18 +127,12 @@ class Oauth2Validator(IdentityValidator):
 
 
 class StaticAPIKeyValidator(IdentityValidator):
-    """
-    Validator for a simple, static API key.
-    Supports a single key or a dictionary mapping multiple keys to user info.
-    """
-
     def __init__(
         self,
-        # Can be a single key (str), or a dict mapping keys to user emails
         key_or_map: Union[str, Mapping[str, str]],
-        # Ignored if key_or_map is a dict; used as email if key_or_map is a str
         user_email: str = "service-account@example.com",
         header_key: str = "X-API-Key",
+        ttl: int = 315360000 # FIX: Added TTL parameter (default ~10 years)
     ):
         if not key_or_map:
             raise ValueError("key_or_map cannot be empty.")
@@ -151,127 +144,87 @@ class StaticAPIKeyValidator(IdentityValidator):
             self.key_map = key_or_map
 
         self.header_key = header_key
-        logger.info(f"StaticAPIKeyValidator initialized for header '{header_key}'.")
+        self.ttl = ttl
 
-    async def validate(self, request: "Request") -> Optional[UserIdentity]:
+    async def validate(self, request: Any) -> Optional[UserIdentity]:
         key_from_header = request.headers.get(self.header_key)
         
         if not key_from_header:
             return None
 
-        # Check if the provided key is in our map
         user_email = self.key_map.get(key_from_header)
 
         if user_email:
-            logger.info(f"Static API Key validation succeeded for user: {user_email}")
-            # Create a token with a very long expiration (e.g., 10 years)
-            far_future_exp = int(time.time() + 315360000)
+            # Calculate expiration based on configured TTL
+            exp_time = int(time.time() + self.ttl)
             user_identity = UserIdentity(
                 id=user_email,
                 email=user_email,
-                exp=far_future_exp,
+                exp=exp_time,
                 provider="static-api-key",
                 claims={
                     "sub": user_email,
                     "email": user_email,
-                    "exp": far_future_exp,
+                    "exp": exp_time,
                     "iat": int(time.time()),
                 },
                 token=key_from_header,
             )
             return user_identity
-        
-        logger.debug("Static API Key validation failed: Key not found.")
         return None
 
 
 class CustomTokenValidator(IdentityValidator):
-    """
-    Validator that uses a custom async callable to validate a token.
-    This allows plugging in any auth system (e.g., DB lookup, external API).
-    The callable must take a string token and return an Awaitable[Optional[UserIdentity]].
-    """
-
     def __init__(
         self,
         auth_callable: AuthCallable,
         header_key: str = "X-API-Key",
-        scheme: Optional[str] = None,  # e.g., "Bearer"
+        scheme: Optional[str] = None,
     ):
         self.auth_callable = auth_callable
         self.header_key = header_key
-        # Normalize scheme to "bearer " (lowercase, with space) or None
         self.scheme = scheme.lower().strip() + " " if scheme else None
         self.scheme_len = len(self.scheme) if self.scheme else 0
-        logger.info(f"CustomTokenValidator initialized for header '{header_key}'.")
 
-
-    async def validate(self, request: "Request") -> Optional[UserIdentity]:
+    async def validate(self, request: Any) -> Optional[UserIdentity]:
         token_from_header = request.headers.get(self.header_key)
 
         if not token_from_header:
             return None
 
-        # Handle schemes like "Bearer <token>"
         token: str
         if self.scheme:
             if not token_from_header.lower().startswith(self.scheme):
-                logger.debug(f"Custom token validation failed: Invalid scheme.")
                 return None
             token = token_from_header[self.scheme_len :]
         else:
             token = token_from_header
 
         if not token:
-            logger.debug("Custom token validation failed: No token provided after scheme processing.")
             return None
 
         try:
             user_identity = await self.auth_callable(token)
             if user_identity:
-                logger.info(
-                    f"CustomTokenValidator succeeded for user: {user_identity.email}"
-                )
-                # Ensure the token is stored in the identity if not already
                 if not user_identity.token:
                     user_identity.token = token
                 return user_identity
         except Exception as e:
             logger.error(f"Error in CustomTokenValidator auth_callable: {e}")
-            # Depending on policy, you might want to re-raise as IdentityException
-            # raise IdentityException(status_code=500, detail="Auth service error")
-
-        logger.debug("Custom token validation failed: Callable returned None.")
         return None
 
 
 class IAPTokenValidator(IdentityValidator):
-    """
-    Validates the 'X-Goog-Iap-Jwt-Assertion' header.
-
-    **Note:** This validator uses the 'google-auth' library's
-    'verify_oauth2_token' function. This function *may* perform network calls
-    to fetch public keys or validate the token with Google's servers, though
-    it also employs caching.
-
-    Validator for GCP IAP's `X-Goog-Iap-Jwt-Assertion` header.
-    """
-
-    def __init__(
-        self,
-        audience: str,
-        authorization_header_key: str = "X-Goog-Iap-Jwt-Assertion",
-    ):
+    def __init__(self, audience: str, authorization_header_key: str = "X-Goog-Iap-Jwt-Assertion"):
+        if not HAS_GOOGLE_AUTH:
+            raise ImportError("google-auth library required for IAPTokenValidator.")
         self.audience = audience
         self.authorization_header_key = authorization_header_key
-        get_iap_public_keys()  # Cache keys on startup
-        logger.info(f"IAPTokenValidator initialized for header '{authorization_header_key}'.")
+        get_iap_public_keys()
 
-
-    async def validate(self, request: "Request") -> Optional[UserIdentity]:
+    async def validate(self, request: Any) -> Optional[UserIdentity]:
         apikey = request.headers.get(self.authorization_header_key)
         if apikey:
-            logger.debug("IAP token (X-Goog-Iap-Jwt-Assertion) detected in request headers.")
             try:
                 decoded_jwt = verify_iap_jwt(apikey, self.audience)
                 user_identity = UserIdentity(
@@ -282,54 +235,101 @@ class IAPTokenValidator(IdentityValidator):
                     provider="google-iap-token",
                     token=apikey,
                 )
-                logger.info(
-                    f"IAP token validation succeeded for: {user_identity.email}"
-                )
                 return user_identity
-            except IdentityException as e:
-                logger.info(f"IAP token validation failed: {e.detail}")
             except Exception as e:
-                logger.error(f"IAP token validation failed with unexpected error: {e}")
+                if isinstance(e, IdentityException):
+                    logger.info(f"IAP token validation failed: {e.detail}")
+                else:
+                    logger.error(f"IAP token error: {e}")
         return None
 
 
 class IAPCookieValidator(IdentityValidator):
-    """
-    Validates the 'GCP_IAP_UID' cookie.
-
-    **Note:** This validator performs *local* cryptographic validation.
-    It uses Google's public keys (cached at startup) to verify the JWT's
-    signature and claims (exp, aud) locally. It does **not** make a network
-    call to Google for every request.
-
-    Validator for GCP IAP's `GCP_IAP_UID` cookie.
-    """
-
     def __init__(self, audience: str):
         self.audience = audience
-        get_iap_public_keys()  # Cache keys on startup
-        logger.info("IAPCookieValidator initialized.")
+        get_iap_public_keys()
 
-    async def validate(self, request: "Request") -> Optional[UserIdentity]:
+    async def validate(self, request: Any) -> Optional[UserIdentity]:
         iap_cookie = request.cookies.get("GCP_IAP_UID")
-        if iap_cookie:
-            logger.debug("GCP_IAP_UID cookie detected in request.")
-            try:
+        if not iap_cookie:
+            return None
+            
+        try:
+            # FIX: Prefer google-auth library for consistent validation if available
+            if HAS_GOOGLE_AUTH and google_requests:
+                request_adapter = google_requests.Request()
+                # verify_oauth2_token handles the heavy lifting (signature, aud, exp)
+                decoded_jwt = verify_oauth2_token(iap_cookie, request_adapter, audience=self.audience)
+            else:
+                # Fallback to local 'jose' validation
                 decoded_jwt = verify_iap_cookie_jwt(iap_cookie, self.audience)
-                user_identity = UserIdentity(
-                    id=decoded_jwt.get("sub", "unknown"),
-                    email=decoded_jwt.get("email", decoded_jwt.get("sub", "unknown")),
-                    exp=decoded_jwt["exp"],
-                    claims=decoded_jwt,
-                    provider="google-iap-cookie",
-                    token=iap_cookie,
-                )
-                logger.info(
-                    f"IAP cookie validation succeeded for: {user_identity.email}"
-                )
-                return user_identity
-            except IdentityException as e:
-                logger.info(f"IAP cookie validation failed: {e.detail}")
-            except Exception as e:
-                logger.error(f"IAP cookie validation failed with unexpected error: {e}")
+
+            user_identity = UserIdentity(
+                id=decoded_jwt.get("sub", "unknown"),
+                email=decoded_jwt.get("email", decoded_jwt.get("sub", "unknown")),
+                exp=decoded_jwt["exp"],
+                claims=decoded_jwt,
+                provider="google-iap-cookie",
+                token=iap_cookie,
+            )
+            return user_identity
+        except Exception as e:
+            # Generic catch for both google-auth errors and jose errors
+            logger.info(f"IAP cookie validation failed: {e}")
         return None
+
+import base64
+import json
+import binascii
+class GoogleGatewayValidator(IdentityValidator):
+    """
+    Validates identity passed by Google Cloud API Gateway or Cloud Endpoints.
+    
+    When the Gateway is configured with a security definition (firebase, auth0, 
+    google_id_token, etc.), it validates the JWT at the edge.
+    It then forwards the request to the backend with the 'X-Apigateway-Api-Userinfo' 
+    header containing the base64 encoded claims (sub, email, etc.).
+    """
+
+    def __init__(self, header_key: str = "X-Apigateway-Api-Userinfo"):
+        self.header_key = header_key
+
+    async def validate(self, request: Any) -> Optional[UserIdentity]:
+        # 1. Get the header injected by the Gateway
+        user_info_b64 = request.headers.get(self.header_key)
+        
+        if not user_info_b64:
+            return None
+
+        try:
+            # 2. Fix Base64 Padding
+            # Google sometimes sends unpadded base64url strings
+            user_info_b64 += "=" * ((4 - len(user_info_b64) % 4) % 4)
+            
+            # 3. Decode
+            user_info_bytes = base64.urlsafe_b64decode(user_info_b64)
+            user_info_str = user_info_bytes.decode("utf-8")
+            user_info = json.loads(user_info_str)
+
+            # 4. Map to UserIdentity
+            # API Gateway has already validated expiration (exp), so we trust it.
+            # We set a short internal expiration (300s) just for the object life.
+            user_identity = UserIdentity(
+                id=user_info.get("sub", "unknown"),
+                # API Gateway mapping varies. Try 'email' then fallback to 'sub'
+                email=user_info.get("email", user_info.get("sub")),
+                exp=int(time.time() + 300), 
+                provider="google-api-gateway",
+                claims=user_info,
+                token=None # The gateway usually strips the original Authorization header
+            )
+            
+            logger.info(f"Gateway API validation succeeded for {user_identity.email}")
+            return user_identity
+
+        except (binascii.Error, json.JSONDecodeError, UnicodeDecodeError) as e:
+            logger.warning(f"Failed to decode Gateway header: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in GoogleGatewayValidator: {e}")
+            return None

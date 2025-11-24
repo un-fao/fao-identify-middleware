@@ -15,6 +15,7 @@
 #    Author: Carlo Cancellieri (ccancellieri@gmail.com)
 #    Company: FAO, Viale delle Terme di Caracalla, 00100 Rome, Italy
 #    Contact: copyright@fao.org - http://fao.org/contact-us/terms/en/
+
 import json
 import typing
 from datetime import datetime
@@ -41,7 +42,7 @@ class DatabaseBackend(Backend):
             db_callable: An async context manager that yields a SQLAlchemy async session.
         """
         try:
-            from sqlalchemy import select, delete, update
+            from sqlalchemy import select, delete
         except ImportError:
             raise ImportError(
                 "SQLAlchemy is required for DatabaseBackend. "
@@ -52,7 +53,6 @@ class DatabaseBackend(Backend):
         self.db_callable = db_callable
         self._select = select
         self._delete = delete
-        self._update = update
 
     async def read(self, session_id: str) -> typing.Dict:
         async with self.db_callable() as db:
@@ -65,12 +65,14 @@ class DatabaseBackend(Backend):
 
     async def write(self, session_id: str, data: typing.Dict, last_modified: datetime) -> None:
         async with self.db_callable() as db:
-            if await self.exists(session_id):
-                stmt = self._update(self.session_table).where(self.session_table.session_id == session_id).values(data=json.dumps(data), last_modified=last_modified)
-                await db.execute(stmt)
-            else:
-                new_session = self.session_table(session_id=session_id, data=json.dumps(data), last_modified=last_modified)
-                db.add(new_session)
+            # merge() checks the primary key; if it exists in the session/DB, it updates,
+            # otherwise it inserts. This is more robust than explicit check-then-insert.
+            session_obj = self.session_table(
+                session_id=session_id, 
+                data=json.dumps(data), 
+                last_modified=last_modified
+            )
+            await db.merge(session_obj)
             await db.commit()
 
     async def remove(self, session_id: str) -> None:
