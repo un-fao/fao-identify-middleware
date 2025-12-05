@@ -245,12 +245,13 @@ class IAPTokenValidator(IdentityValidator):
 
 
 class IAPCookieValidator(IdentityValidator):
-    def __init__(self, audience: str):
+    def __init__(self, audience: str, cookie_name: str = "GCP_IAP_UID"):
         self.audience = audience
+        self.cookie_name = cookie_name
         get_iap_public_keys()
 
     async def validate(self, request: Any) -> Optional[UserIdentity]:
-        iap_cookie = request.cookies.get("GCP_IAP_UID")
+        iap_cookie = request.cookies.get(self.cookie_name)
         if not iap_cookie:
             return None
             
