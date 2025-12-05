@@ -84,6 +84,27 @@ def get_iap_public_keys() -> dict:
         logger.error(f"Error fetching IAP public keys: {e}")
         raise IdentityException(status_code=500, detail="Could not fetch IAP public keys.") from e
 
+import base64
+import json
+
+def decode_iap_jwt(token):
+    # Split the JWT to get the payload (header.payload.signature)
+    # We usually care about the payload (index 1)
+    parts = token.split('.')
+    if len(parts) < 2:
+        raise ValueError("Invalid Token Format")
+        
+    payload = parts[1]
+    
+    # Calculate missing padding
+    missing_padding = len(payload) % 4
+    if missing_padding:
+        payload += '=' * (4 - missing_padding)
+    
+    # Now decode
+    decoded_bytes = base64.urlsafe_b64decode(payload)
+    return json.loads(decoded_bytes)
+
 def verify_iap_cookie_jwt(iap_jwt_cookie: str, audience: str) -> dict:
     """
     Verifies the IAP JWT using local `jose` library. 

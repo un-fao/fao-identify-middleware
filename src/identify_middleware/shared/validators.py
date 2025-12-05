@@ -256,14 +256,24 @@ class IAPCookieValidator(IdentityValidator):
             return None
             
         try:
-            # FIX: Prefer google-auth library for consistent validation if available
-            if HAS_GOOGLE_AUTH and google_requests:
-                request_adapter = google_requests.Request()
-                # verify_oauth2_token handles the heavy lifting (signature, aud, exp)
-                decoded_jwt = verify_oauth2_token(iap_cookie, request_adapter, audience=self.audience)
-            else:
-                # Fallback to local 'jose' validation
-                decoded_jwt = verify_iap_cookie_jwt(iap_cookie, self.audience)
+            # TODO use decode_iap_jwt() when google-auth adds support for IAP cookies
+            from identify_middleware.shared.jwt_utils import decode_iap_jwt
+            decoded_jwt = None
+            try:
+                decoded_jwt = decode_iap_jwt(iap_cookie)
+                logger.debug(f"decoded cookie: {decoded_jwt}")
+            except Exception as e:
+                logger.debug(f"decode_iap_jwt failed: {e}")
+
+            if not decoded_jwt:
+                # FIX: Prefer google-auth library for consistent validation if available
+                if HAS_GOOGLE_AUTH and google_requests:
+                    request_adapter = google_requests.Request()
+                    # verify_oauth2_token handles the heavy lifting (signature, aud, exp)
+                    decoded_jwt = verify_oauth2_token(iap_cookie, request_adapter, audience=self.audience)
+                else:
+                    # Fallback to local 'jose' validation
+                    decoded_jwt = verify_iap_cookie_jwt(iap_cookie, self.audience)
 
             user_identity = UserIdentity(
                 id=decoded_jwt.get("sub", "unknown"),
